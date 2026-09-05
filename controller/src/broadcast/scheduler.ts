@@ -883,7 +883,17 @@ const talkLogged: Partial<Record<TalkKind, string | null>> = {};
 // one-talker-per-slot rule of #310). Keyed by hour so a stale result can never
 // gate the NEXT hour's check.
 type SessionRoll = Awaited<ReturnType<typeof rollSessionNow>>;
-let lastRoll: { hourKey: string; roll: SessionRoll } | null = null;
+export type TalkTickState = {
+  fired: Partial<Record<TalkKind, string | null>>;
+  logged: Partial<Record<TalkKind, string | null>>;
+  lastRoll: { hourKey: string; roll: SessionRoll } | null;
+};
+
+const talkTickState: TalkTickState = {
+  fired: talkFired,
+  logged: talkLogged,
+  lastRoll: null,
+};
 
 const hourKey = (now: Date) =>
   `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}-${now.getHours()}`;
@@ -984,8 +994,27 @@ const TALK_FAILURE_LABEL: Record<TalkKind, (slot: string) => string> = {
   programme: slot => `Programme ${slot} tick`,
 };
 
-async function talkTick() {
-  const now = new Date();
+type TalkTickDeps = {
+  now: Date;
+  rollSession: () => Promise<SessionRoll>;
+  lastTalkBreakAt: () => number;
+  pendingTalk: () => { kind: string; queuedAt: number } | null;
+  eligible: (kind: TalkKind, now: Date, rolled: SessionRoll | null) => boolean;
+  externalSlot: (kind: TalkKind, now: Date) => string | null;
+  betweenTracksOnly: () => boolean;
+  plan: typeof talkTickPlan;
+  log: (kind: 'error' | 'scheduler', message: string) => void;
+  runSlot: (plan: Extract<TalkPlan, { act: 'fire' }>) => Promise<unknown>;
+};
+
+// The exact executor used by the cron callback. Dependencies and state are
+// explicit so disabled-path compatibility tests can invoke the real
+// plan→claim→dispatch loop without starting cron or making an LLM call.
+export async function executeTalkTick(
+  deps: TalkTickDeps,
+  state: TalkTickState,
+): Promise<TalkPlan[]> {
+  const now = deps.now;
 
   // The top of the hour is the natural show boundary for STATE — roll the
   // session here so a scheduled show starting/ending opens a fresh chat history
@@ -1003,38 +1032,37 @@ async function talkTick() {
   // queue.onTrackStarted has already rolled and aired it a track earlier via
   // its look-ahead, making this call a no-op.
   if (now.getMinutes() === 0) {
-    // rollSessionNow traps every step of its own, but this tick is now the one
-    // cron behind every scheduled segment: a rejection here must not take the
-    // rest of the minute — or, unhandled, the process — with it.
-    const roll = await rollSessionNow({ airHandoff: false, reason: 'scheduled boundary' }).catch(err => {
-      queue.log('error', `Session roll failed: ${err.message}`);
-      return null;
-    });
-    lastRoll = roll ? { hourKey: hourKey(now), roll } : null;
+    try {
+      const roll = await deps.rollSession();
+      state.lastRoll = roll ? { hourKey: hourKey(now), roll } : null;
+    } catch (err) {
+      deps.log('error', `Session roll failed: ${(err as Error).message}`);
+      state.lastRoll = null;
+    }
   }
-  const rolled = lastRoll?.hourKey === hourKey(now) ? lastRoll.roll : null;
+  const rolled = state.lastRoll?.hourKey === hourKey(now) ? state.lastRoll.roll : null;
 
   // A gate that throws used to cost one cron its tick; it would now cost the
   // minute every scheduled segment shares. runTalkSlot traps the segments
   // themselves — this covers the planning around them.
   let plans: TalkPlan[] = [];
   try {
-    plans = talkTickPlan({
+    plans = deps.plan({
       now,
-      lastTalkBreakAt: queue.getLastTalkBreakAt(),
-      pendingTalk: queue.pendingVoiceTalk(),
-      eligible: kind => talkEligible(kind, now, rolled),
-      externalSlot: kind => (kind === 'programme' ? programme.dueBeat(now) : null),
+      lastTalkBreakAt: deps.lastTalkBreakAt(),
+      pendingTalk: deps.pendingTalk(),
+      eligible: kind => deps.eligible(kind, now, rolled),
+      externalSlot: kind => deps.externalSlot(kind, now),
       // Read once per tick, not per row: a switch that flipped mid-plan could
       // hand one row an immediate air and the next a deferred one on the same
       // minute, and the pending-clip hold is only coherent if every row in the
       // plan agrees about it.
-      betweenTracksOnly: talkOnlyBetweenTracks(),
-      fired: talkFired,
-      logged: talkLogged,
+      betweenTracksOnly: deps.betweenTracksOnly(),
+      fired: state.fired,
+      logged: state.logged,
     });
   } catch (err) {
-    queue.log('error', `Talk tick planning failed: ${err.message}`);
+    deps.log('error', `Talk tick planning failed: ${(err as Error).message}`);
   }
 
   // Sequential, in the table's dispatch order. Only the programme row can come
@@ -1043,13 +1071,30 @@ async function talkTick() {
   // property of the table instead of of cron registration order.
   for (const plan of plans) {
     if (plan.act === 'wait') {
-      if (plan.markLogged) talkLogged[plan.kind] = plan.markLogged;
-      if (plan.log) queue.log('scheduler', plan.log);
+      if (plan.markLogged) state.logged[plan.kind] = plan.markLogged;
+      if (plan.log) deps.log('scheduler', plan.log);
       continue;
     }
-    talkFired[plan.kind] = plan.slotKey;  // claim the slot before any await — see above
-    await runTalkSlot(plan);
+    state.fired[plan.kind] = plan.slotKey;  // claim the slot before any await — see above
+    await deps.runSlot(plan);
   }
+  return plans;
+}
+
+async function talkTick() {
+  const now = new Date();
+  await executeTalkTick({
+    now,
+    rollSession: () => rollSessionNow({ airHandoff: false, reason: 'scheduled boundary' }),
+    lastTalkBreakAt: () => queue.getLastTalkBreakAt(),
+    pendingTalk: () => queue.pendingVoiceTalk(),
+    eligible: (kind, at, rolled) => talkEligible(kind, at, rolled),
+    externalSlot: (kind, at) => (kind === 'programme' ? programme.dueBeat(at) : null),
+    betweenTracksOnly: () => talkOnlyBetweenTracks(),
+    plan: talkTickPlan,
+    log: (kind, message) => queue.log(kind, message),
+    runSlot: plan => runTalkSlot(plan),
+  }, talkTickState);
 }
 
 // ---------------------------------------------------------------------------
