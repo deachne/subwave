@@ -20,12 +20,13 @@
 // Import from './settings.js' — never from './settings/*' directly outside
 // this directory, so the public surface stays one file.
 
-import { readFile, unlink, readdir } from 'node:fs/promises';
+import { lstat, readFile, stat, unlink, writeFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { STATE_DIR } from './config.js';
 import { writeFileAtomic } from './util/atomic-file.js';
 import { DEFAULT_THEME_ID, isValidThemeId, listThemes } from './themes.js';
 import { isValidTimezone, setStationTimezone } from './time.js';
+import { BROADCAST_QA_PROFILES } from './schemas/voice.js';
 // The bitrate vocabularies are no longer read here — the archive/stream
 // schemas own them (#1348). They stay in the re-export block below, which
 // forwards straight from vocab.js, so the public surface is unchanged.
@@ -105,6 +106,7 @@ import {
   normalizeDuckDepth,
   normalizePersonaArray,
   normalizeTtsFallback,
+  normalizeBroadcastQa,
   normalizeSchedule,
   normalizeScheduleOverride,
   normalizeShows,
@@ -118,14 +120,17 @@ import {
   validateScheduleStrict,
   validateShowsStrict,
   validateTtsBlock,
+  validateBroadcastQaStrict,
   validateWebhooksStrict,
 } from './settings/validate.js';
+import { emitBroadcastQaChange } from './settings/change-events.js';
 import {
   ICECAST_LISTENER_AUTH_PATH,
   LIQ_ARCHIVE_BITRATE_PATH,
   LIQ_ARCHIVE_ENABLED_PATH,
   LIQ_CROSSFADE_PATH,
   LIQ_JINGLE_RATIO_PATH,
+  LIQUIDSOAP_SETTINGS_PATHS,
   LIQ_OPUS_ENABLED_PATH,
   LIQ_STREAM_BITRATE_PATH,
   LIQ_STREAM_BUFFER_SECONDS_PATH,
@@ -173,6 +178,7 @@ export {
   TONE_DIALS,
   TTS_CLOUD_PROVIDERS,
   TTS_CORRECTIONS_LIMIT,
+  BROADCAST_QA_PROFILES,
   TTS_ENGINES,
   TTS_GAIN_CLAMP_DB,
   TTS_SPEED_DEFAULT,
@@ -261,6 +267,49 @@ const SETTINGS_PATH = `${STATE_DIR}/settings.json`;
 // always loaded/saved together, so they share one file. On first load after
 // upgrade, load() migrates them out of settings.json into here.
 const SCHEDULE_PATH = `${STATE_DIR}/schedule.json`;
+
+type DurableFileSnapshot =
+  | { path: string; kind: 'missing' | 'other' }
+  | { path: string; kind: 'file' | 'symlink-file'; contents: Buffer };
+
+async function snapshotDurableFile(path: string): Promise<DurableFileSnapshot> {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) {
+      let target;
+      try {
+        target = await stat(path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { path, kind: 'other' };
+        throw err;
+      }
+      if (!target.isFile()) return { path, kind: 'other' };
+      return { path, kind: 'symlink-file', contents: await readFile(path) };
+    }
+    if (!info.isFile()) return { path, kind: 'other' };
+    return { path, kind: 'file', contents: await readFile(path) };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { path, kind: 'missing' };
+    throw err;
+  }
+}
+
+async function restoreDurableFile(snapshot: DurableFileSnapshot): Promise<void> {
+  if (snapshot.kind === 'other') return;
+  if (snapshot.kind === 'symlink-file') {
+    await writeFile(snapshot.path, snapshot.contents);
+    return;
+  }
+  if (snapshot.kind === 'file') {
+    await writeFileAtomic(snapshot.path, snapshot.contents);
+    return;
+  }
+  try {
+    await unlink(snapshot.path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
 
 // Integer clamp shared by the settings.requests load()/update() coercions
 // below — round, then clamp into [min, max]; a non-finite input (missing,
@@ -812,6 +861,10 @@ export async function load() {
       // Operator speech corrections — malformed entries dropped, list capped.
       // An older save (no corrections) loads as [].
       corrections: normalizeTtsCorrections(stored.tts?.corrections),
+      // Default-off broadcast QA. This block composes explicitly rather than
+      // spreading DEFAULTS, so a missing line here would save and then vanish
+      // on the next cold load.
+      broadcastQa: normalizeBroadcastQa(stored.tts?.broadcastQa),
     },
     llm: {
       provider: LLM_PROVIDERS.includes(stored.llm?.provider)
@@ -1138,13 +1191,25 @@ export async function load() {
     console.warn(`[settings] ignoring invalid timezone "${stored.timezone.trim()}" — using Auto (container TZ)`);
   }
   setStationTimezone(loaded.timezone);
+  emitBroadcastQaChange(loaded.tts.broadcastQa);
   return loaded;
 }
 
 // Lenient normalizer — used by load(). Drops invalid entries silently rather
 // than failing the whole boot.
 
-export async function update(patch) {
+let settingsUpdateTail: Promise<void> = Promise.resolve();
+
+export function update(patch) {
+  const result = settingsUpdateTail.then(() => updateUnlocked(patch));
+  settingsUpdateTail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+async function updateUnlocked(patch) {
   const cur = await load();
   const next = JSON.parse(JSON.stringify(cur));
   let restart = false;
@@ -1721,6 +1786,9 @@ export async function update(patch) {
     if (t.corrections !== undefined) {
       next.tts.corrections = validateTtsCorrectionsStrict(t.corrections);
     }
+    if (t.broadcastQa !== undefined) {
+      next.tts.broadcastQa = validateBroadcastQaStrict(t.broadcastQa);
+    }
   }
   if ('llm' in patch) {
     const l = patch.llm || {};
@@ -2227,28 +2295,58 @@ export async function update(patch) {
     }
   }
 
-  setCache(next);
-  // Applied-on-save, same pattern as the liquidsoap_*.txt files below —
-  // minus the restart: the next zonedParts() call picks it up.
-  setStationTimezone(next.timezone);
+  // JSON cloning above necessarily thaws nested objects. Reattach the one
+  // immutable profile map before persistence/cache so callers can never mutate
+  // the fixed safety bounds through settings.get().
+  next.tts.broadcastQa.profiles = BROADCAST_QA_PROFILES;
   // shows + schedule are persisted to their own file (schedule.json); strip
   // them from the settings.json payload so legacy installs migrate forward
   // on the first write. The in-memory `cache` keeps the full shape so
   // resolveActiveShow / getEffectivePersona / the integrity sweep all
   // continue to work against one merged view.
   const { shows: _shows, schedule: _schedule, scheduleOverride: _override, ...settingsPersist } = next;
-  // Atomic replace — a crash mid-write must not take the operator's whole
-  // config (or show schedule) with it.
-  await writeFileAtomic(SETTINGS_PATH, JSON.stringify(settingsPersist, null, 2));
-  await writeFileAtomic(
-    SCHEDULE_PATH,
-    JSON.stringify(
-      { shows: next.shows, schedule: next.schedule, override: next.scheduleOverride ?? null },
-      null,
-      2,
-    ),
+  const durableSnapshots = await Promise.all(
+    [SETTINGS_PATH, SCHEDULE_PATH, ...LIQUIDSOAP_SETTINGS_PATHS]
+      .map(snapshotDurableFile),
   );
-  await writeLiquidsoapSettings(next);
+  try {
+    // settings.json carries the live broadcast-QA switch and remains the
+    // commit point. The snapshots also make a failure at that final write roll
+    // back schedule/Liquidsoap side effects from this rejected update.
+    await writeFileAtomic(
+      SCHEDULE_PATH,
+      JSON.stringify(
+        { shows: next.shows, schedule: next.schedule, override: next.scheduleOverride ?? null },
+        null,
+        2,
+      ),
+    );
+    await writeLiquidsoapSettings(next);
+    await writeFileAtomic(SETTINGS_PATH, JSON.stringify(settingsPersist, null, 2));
+  } catch (err) {
+    const rollbackErrors: unknown[] = [];
+    for (const snapshot of [...durableSnapshots].reverse()) {
+      try {
+        await restoreDurableFile(snapshot);
+      } catch (rollbackErr) {
+        rollbackErrors.push(rollbackErr);
+      }
+    }
+    if (rollbackErrors.length) {
+      throw new AggregateError(
+        [err, ...rollbackErrors],
+        'settings persistence failed and durable files could not be fully restored',
+      );
+    }
+    throw err;
+  }
+  // Publish process state only after every durable write succeeds. A failed
+  // save must leave both the live cache and QA subscribers on the old policy.
+  setCache(next);
+  // Applied-on-save, same pattern as the liquidsoap_*.txt files above —
+  // minus the restart: the next zonedParts() call picks it up.
+  setStationTimezone(next.timezone);
+  emitBroadcastQaChange(next.tts.broadcastQa);
   return { saved: next, requiresRestart: restart };
 }
 

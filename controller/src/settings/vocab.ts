@@ -60,6 +60,7 @@ import {
   SETTINGS_OPUS_BITRATES,
   SETTINGS_SEARCH_PROVIDERS,
 } from '../schemas/settings.js';
+export { BROADCAST_QA_PROFILES } from '../schemas/voice.js';
 
 // Default DJ system-prompt template. Placeholders are substituted at LLM
 // call time via renderDjPrompt(). Keep {name} mandatory — update() refuses

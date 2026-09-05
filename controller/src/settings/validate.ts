@@ -15,12 +15,18 @@ import { djPromptsSchema, personasSchema, ttsVoiceSlotSchema } from '../schemas/
 import { resolveDjPromptIds, resolvePersonaIds } from '../schemas/persona-server.js';
 import { scheduleSchema, scheduleOverrideSchema } from '../schemas/schedule.js';
 import {
+  BROADCAST_QA_REPLACEMENTS_LIMIT,
+  BROADCAST_QA_RULES_LIMIT,
+  broadcastQaReplacementSchema,
+  broadcastQaRuleSchema,
   festivalsSchema,
   moodScheduleSchema,
   moodsSchema,
   weatherMoodsSchema,
 } from '../schemas/settings.js';
+import { BROADCAST_QA_PROFILES, type BroadcastQaSettings } from '../schemas/voice.js';
 import { firstMessage } from '../util/zod-error.js';
+import { canonicalJson } from '../util/canonical-json.js';
 
 /**
  * Run a mood-family schema and rethrow as a plain Error (#1348).
@@ -219,6 +225,64 @@ export function assertNoOrphanMoods(next: any): void {
 
 export function validateFestivalsStrict(raw, moodNames: string[] = SHOW_MOODS) {
   return runMoodSchema(festivalsSchema({ moodNames }), raw);
+}
+
+function uniqueIdsOrThrow(items: Array<{ id: string }>, label: string): void {
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item.id)) throw new Error(`tts.broadcastQa ${label} id "${item.id}" is duplicated`);
+    seen.add(item.id);
+  }
+}
+
+function profilesExactOrThrow(raw: unknown): typeof BROADCAST_QA_PROFILES {
+  if (raw === undefined) return BROADCAST_QA_PROFILES;
+  try {
+    if (canonicalJson(raw) === canonicalJson(BROADCAST_QA_PROFILES)) return BROADCAST_QA_PROFILES;
+  } catch {
+    throw new Error('tts.broadcastQa.profiles must equal the fixed duration map');
+  }
+  throw new Error('tts.broadcastQa.profiles must equal the fixed duration map');
+}
+
+export function validateBroadcastQaStrict(raw: unknown): BroadcastQaSettings {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('tts.broadcastQa must be an object');
+  }
+  const rec = raw as Record<string, unknown>;
+  const allowedKeys = new Set(['enabled', 'replacements', 'rules', 'profiles']);
+  const unknownKey = Object.keys(rec).find((key) => !allowedKeys.has(key));
+  if (unknownKey) throw new Error(`tts.broadcastQa has unknown field "${unknownKey}"`);
+  if (typeof rec.enabled !== 'boolean') throw new Error('tts.broadcastQa.enabled must be a boolean');
+  if (!Array.isArray(rec.replacements)) throw new Error('tts.broadcastQa.replacements must be an array');
+  if (!Array.isArray(rec.rules)) throw new Error('tts.broadcastQa.rules must be an array');
+  if (rec.replacements.length > BROADCAST_QA_REPLACEMENTS_LIMIT) {
+    throw new Error(`tts.broadcastQa.replacements must be at most ${BROADCAST_QA_REPLACEMENTS_LIMIT} entries`);
+  }
+  if (rec.rules.length > BROADCAST_QA_RULES_LIMIT) {
+    throw new Error(`tts.broadcastQa.rules must be at most ${BROADCAST_QA_RULES_LIMIT} entries`);
+  }
+  const replacements = rec.replacements.map((item, i) => {
+    const parsed = broadcastQaReplacementSchema.safeParse(item);
+    if (!parsed.success) {
+      throw new Error(firstMessage(parsed.error, `tts.broadcastQa.replacements.${i}`));
+    }
+    return parsed.data;
+  });
+  const rules = rec.rules.map((item, i) => {
+    const parsed = broadcastQaRuleSchema.safeParse(item);
+    if (!parsed.success) {
+      throw new Error(firstMessage(parsed.error, `tts.broadcastQa.rules.${i}`));
+    }
+    return parsed.data;
+  });
+  uniqueIdsOrThrow([...replacements, ...rules], 'policy');
+  return {
+    enabled: rec.enabled,
+    replacements,
+    rules,
+    profiles: profilesExactOrThrow(rec.profiles),
+  };
 }
 
 // Validate + persist. Returns { saved, requiresRestart } so the UI can react.

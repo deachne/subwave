@@ -42,6 +42,26 @@ const LIQ_STATION_NAME_PATH = `${STATE_DIR}/liquidsoap_station_name.txt`;
 // icecast.xml on the next broadcast restart.
 export const ICECAST_LISTENER_AUTH_PATH = `${STATE_DIR}/icecast_listener_auth.txt`;
 
+export const LIQUIDSOAP_SETTINGS_PATHS = Object.freeze([
+  LIQ_JINGLE_RATIO_PATH,
+  LIQ_CROSSFADE_PATH,
+  LIQ_DUCK_VOICE_PATH,
+  LIQ_DUCK_INTRO_PATH,
+  LIQ_ARCHIVE_ENABLED_PATH,
+  LIQ_ARCHIVE_BITRATE_PATH,
+  LIQ_OPUS_ENABLED_PATH,
+  LIQ_OPUS_BITRATE_PATH,
+  LIQ_FLAC_ENABLED_PATH,
+  LIQ_OGG_ICY_METADATA_PATH,
+  LIQ_AAC_ENABLED_PATH,
+  LIQ_AAC_BITRATE_PATH,
+  LIQ_STREAM_BITRATE_PATH,
+  LIQ_STREAM_BUFFER_SECONDS_PATH,
+  LIQ_ICECAST_MAX_CLIENTS_PATH,
+  LIQ_STATION_NAME_PATH,
+  ICECAST_LISTENER_AUTH_PATH,
+] as const);
+
 export async function writeLiquidsoapSettings(s) {
   await writeFile(LIQ_JINGLE_RATIO_PATH, String(s.jingleRatio));
   await writeFile(LIQ_CROSSFADE_PATH, String(s.crossfadeDuration));

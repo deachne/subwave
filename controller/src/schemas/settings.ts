@@ -1266,3 +1266,54 @@ export function djPromptTextSchema(bounds: { min: number; max: number }) {
       return v;
     });
 }
+
+// Broadcast QA policy leaves. The full tts object stays off SETTINGS_PATCH_SCHEMAS
+// — a nested zod object would strip cloud/speed/gain/corrections/fallback.
+// These leaves are shared by the strict validator and the lenient load path.
+export const BROADCAST_QA_POLICY_ID_RE = /^[a-z][a-z0-9_.-]{0,63}$/;
+export const BROADCAST_QA_REPLACEMENTS_LIMIT = 100;
+export const BROADCAST_QA_RULES_LIMIT = 100;
+export const BROADCAST_QA_MATCH_MAX = 80;
+export const BROADCAST_QA_REPLACEMENT_MAX = 160;
+export const BROADCAST_QA_RULE_VALUE_MAX = 80;
+export const BROADCAST_QA_STATION_HOUR_MAX = 20;
+
+export const broadcastQaBoundarySchema = z.enum(['none', 'start', 'end', 'both']);
+export const broadcastQaRuleTypeSchema = z.enum([
+  'phrase',
+  'first-line-opener',
+  'sentence-opener',
+  'station-hour-limit',
+]);
+
+export const broadcastQaReplacementSchema = z.object({
+  id: z.string().regex(BROADCAST_QA_POLICY_ID_RE, 'tts.broadcastQa replacement id is invalid'),
+  match: z.string().min(1).max(BROADCAST_QA_MATCH_MAX),
+  replacement: z.string().max(BROADCAST_QA_REPLACEMENT_MAX),
+  caseSensitive: z.boolean(),
+  boundary: broadcastQaBoundarySchema,
+}).strict();
+
+export const broadcastQaRuleSchema = z.discriminatedUnion('type', [
+  z.object({
+    id: z.string().regex(BROADCAST_QA_POLICY_ID_RE, 'tts.broadcastQa rule id is invalid'),
+    type: z.literal('phrase'),
+    value: z.string().min(1).max(BROADCAST_QA_RULE_VALUE_MAX),
+  }).strict(),
+  z.object({
+    id: z.string().regex(BROADCAST_QA_POLICY_ID_RE, 'tts.broadcastQa rule id is invalid'),
+    type: z.literal('first-line-opener'),
+    value: z.string().min(1).max(BROADCAST_QA_RULE_VALUE_MAX),
+  }).strict(),
+  z.object({
+    id: z.string().regex(BROADCAST_QA_POLICY_ID_RE, 'tts.broadcastQa rule id is invalid'),
+    type: z.literal('sentence-opener'),
+    value: z.string().min(1).max(BROADCAST_QA_RULE_VALUE_MAX),
+  }).strict(),
+  z.object({
+    id: z.string().regex(BROADCAST_QA_POLICY_ID_RE, 'tts.broadcastQa rule id is invalid'),
+    type: z.literal('station-hour-limit'),
+    value: z.string().min(1).max(BROADCAST_QA_RULE_VALUE_MAX),
+    max: z.number().int().min(1).max(BROADCAST_QA_STATION_HOUR_MAX),
+  }).strict(),
+]);

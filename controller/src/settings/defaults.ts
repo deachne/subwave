@@ -16,6 +16,7 @@ import {
   LOUDNESS_MAX_BOOST_DB_BOUNDS,
   LOUDNESS_TARGET_LUFS_BOUNDS,
 } from '../schemas/settings.js';
+import { BROADCAST_QA_PROFILES } from '../schemas/voice.js';
 import { SHOW_MAX_TRACK_SECONDS } from '../schemas/show.js';
 import { DEFAULT_THEME_ID } from '../themes.js';
 import {
@@ -303,6 +304,14 @@ export const DEFAULTS = {
     // Find→replace pairs applied to every booth-bound line before any engine sees
     // it (audio/speech-text.ts), e.g. { from: 'GHz', to: 'gigahertz' }.
     corrections: [],
+    // Default-off broadcast text/audio QA. Absent or malformed settings keep
+    // this disabled block so an upgrade is byte-identical on air.
+    broadcastQa: {
+      enabled: false,
+      replacements: [],
+      rules: [],
+      profiles: BROADCAST_QA_PROFILES,
+    },
   },
   llm: {
     provider: 'ollama',

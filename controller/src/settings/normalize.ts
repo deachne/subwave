@@ -16,6 +16,15 @@ import {
   emptyWeek,
 } from './vocab.js';
 import { DEFAULTS, coerceMaxTrackSeconds } from './defaults.js';
+import type { BroadcastQaSettings } from '../schemas/voice.js';
+import { BROADCAST_QA_PROFILES } from '../schemas/voice.js';
+import {
+  BROADCAST_QA_REPLACEMENTS_LIMIT,
+  BROADCAST_QA_RULES_LIMIT,
+  broadcastQaReplacementSchema,
+  broadcastQaRuleSchema,
+} from '../schemas/settings.js';
+import { canonicalJson } from '../util/canonical-json.js';
 // The webhook rules themselves, so this lenient path and update()'s strict one
 // cannot restate them differently — see normalizeWebhooks below.
 import { WEBHOOK_ID_RE, webhookSchema, type WebhookParsed } from '../schemas/webhook.js';
@@ -289,6 +298,63 @@ export function normalizeWebhooks(raw: unknown): Webhook[] {
   // resolving the redaction sentinel against nothing would blank a stored
   // header rather than leave it alone.
   return resolveWebhookIds(rows);
+}
+
+function uniquePolicyIds(items: Array<{ id: string }>): boolean {
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+  }
+  return true;
+}
+
+// Lenient on-load pass: absent/malformed input returns the disabled default
+// so a hand-edited settings.json cannot wedge boot or silently enable QA.
+export function normalizeBroadcastQa(raw: unknown): BroadcastQaSettings {
+  const disabled = DEFAULTS.tts.broadcastQa;
+  const failClosed = (): BroadcastQaSettings => ({
+    enabled: false,
+    replacements: [],
+    rules: [],
+    profiles: BROADCAST_QA_PROFILES,
+  });
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ...disabled, profiles: BROADCAST_QA_PROFILES };
+  }
+  const rec = raw as Record<string, unknown>;
+  const allowedKeys = new Set(['enabled', 'replacements', 'rules', 'profiles']);
+  if (
+    Object.keys(rec).some((key) => !allowedKeys.has(key))
+    || typeof rec.enabled !== 'boolean'
+    || !Array.isArray(rec.replacements)
+    || !Array.isArray(rec.rules)
+    || rec.replacements.length > BROADCAST_QA_REPLACEMENTS_LIMIT
+    || rec.rules.length > BROADCAST_QA_RULES_LIMIT
+  ) {
+    return failClosed();
+  }
+  const replacements: BroadcastQaSettings['replacements'] = [];
+  for (const item of rec.replacements) {
+    const parsed = broadcastQaReplacementSchema.safeParse(item);
+    if (!parsed.success) return failClosed();
+    replacements.push(parsed.data);
+  }
+  const rules: BroadcastQaSettings['rules'] = [];
+  for (const item of rec.rules) {
+    const parsed = broadcastQaRuleSchema.safeParse(item);
+    if (!parsed.success) return failClosed();
+    rules.push(parsed.data);
+  }
+  if (!uniquePolicyIds([...replacements, ...rules])) return failClosed();
+  if (rec.profiles !== undefined) {
+    try {
+      if (canonicalJson(rec.profiles) !== canonicalJson(BROADCAST_QA_PROFILES)) return failClosed();
+    } catch {
+      return failClosed();
+    }
+  }
+  return { enabled: rec.enabled, replacements, rules, profiles: BROADCAST_QA_PROFILES };
 }
 
 

@@ -1045,3 +1045,11 @@ test('update() reports the second slice through fieldErrors at the route', () =>
   // stream's branch runs before likes', so it owns the flat string.
   assert.equal(failure.error, 'stream.bufferSeconds must be a number between 0 and 60');
 });
+
+test('tts stays off the patch-schema registry so a nested broadcastQa object cannot strip sibling TTS fields', () => {
+  // The registry's Zod object strips unknown nested keys. Converting only
+  // broadcastQa there would delete cloud, speed, gain, corrections and fallback
+  // on every TTS save. Keep the hand-written tts update() branch.
+  assert.equal(Object.hasOwn(SETTINGS_PATCH_SCHEMAS, 'tts'), false);
+  assert.ok(SETTINGS_PATCH_KEYS.includes('tts'));
+});
