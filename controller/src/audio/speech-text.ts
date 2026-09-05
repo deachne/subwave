@@ -51,7 +51,10 @@ function correctionPattern(from: string): RegExp {
   return new RegExp(`${lead}${escaped}${trail}`, 'gi');
 }
 
-function applyCorrections(text: string, corrections: readonly SpeechCorrection[]): string {
+export function applySpeechCorrections(
+  text: string,
+  corrections: readonly SpeechCorrection[],
+): string {
   let t = text;
   for (const c of corrections) {
     const from = typeof c?.from === 'string' ? c.from.trim() : '';
@@ -131,7 +134,7 @@ export function normalizeForSpeech(
   // After markdown/entity cleanup so a rule matches the readable text the
   // operator sees ("**Hozier**" still matches a "Hozier" rule), and BEFORE
   // the symbol rules so a correction can pre-empt a built-in expansion.
-  if (corrections?.length) t = applyCorrections(t, corrections);
+  if (corrections?.length) t = applySpeechCorrections(t, corrections);
 
   // --- units and symbols (all keyed on an adjacent digit — conservative) ---
   t = t.replace(/(\d)\s*°\s*F\b/g, '$1 degrees Fahrenheit');

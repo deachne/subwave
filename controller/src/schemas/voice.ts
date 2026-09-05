@@ -49,6 +49,13 @@ export const factLockSchema = z.object({
   sourceRef: z.string().optional(),
   sourceRevision: z.string().optional(),
   spokenValue: z.string().optional(),
+}).strict().superRefine((lock, ctx) => {
+  if ((lock.sourceRef === undefined) !== (lock.sourceRevision === undefined)) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'fact lock sourceRef and sourceRevision must be supplied together',
+    });
+  }
 });
 export type FactLock = z.infer<typeof factLockSchema>;
 
@@ -66,7 +73,7 @@ export const provenanceLeaseSchema = z.object({
   candidateRevision: z.string().min(1),
   revalidationKey: z.string().min(1),
   groundedGeneration: z.number().int().optional(),
-});
+}).strict();
 export type ProvenanceLease = z.infer<typeof provenanceLeaseSchema>;
 
 export const reviewedAssetWaiverSchema = z.object({
@@ -92,7 +99,7 @@ export const ecWarningCopyProofSchema = z.object({
   mandatoryDisplayText: z.string().min(1),
   fullTextHash: z.string().min(1),
   mandatoryTextHash: z.string().min(1),
-});
+}).strict();
 export type EcWarningCopyProof = z.infer<typeof ecWarningCopyProofSchema>;
 
 export const VOICE_QA_STAGE_VALUES = [
