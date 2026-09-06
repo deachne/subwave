@@ -5,6 +5,7 @@
 // Part of the doctor/ split - see ../doctor.ts for the section runner.
 
 import { config } from '../config.js';
+import { execFile } from 'node:child_process';
 import * as subsonic from '../music/subsonic.js';
 import * as subsonicLog from '../music/subsonic-log.js';
 import * as library from '../music/library.js';
@@ -22,6 +23,11 @@ import {
 import { recentCalls } from '../llm/log.js';
 import type { Finding, StationSettings } from './types.js';
 import { classifyModel, isSchemaFailure } from './util.js';
+import {
+  probeVoiceAuditSinks,
+  readVoiceAuditHealth,
+  redactVoiceAuditError,
+} from '../broadcast/voice-audit/health.js';
 
 // ---------------------------------------------------------------------------
 // Sections
@@ -344,6 +350,61 @@ export async function checkTts(s: StationSettings | null): Promise<Finding[]> {
         : `${spoken.engine ?? 'piper'}`,
     });
   } catch { /* routing snapshot is best-effort */ }
+
+  if (s?.tts?.broadcastQa?.enabled === true) {
+    const executableAvailable = (command: string) => new Promise<boolean>((resolve) => {
+      execFile(command, ['-version'], { timeout: 5_000 }, (error) => resolve(!error));
+    });
+    const [ffmpeg, ffprobe] = await Promise.all([
+      executableAvailable('ffmpeg'),
+      executableAvailable('ffprobe'),
+    ]);
+    out.push({
+      label: 'broadcast QA ffmpeg',
+      status: ffmpeg ? 'ok' : 'fail',
+      detail: ffmpeg ? 'available' : 'missing',
+      hint: ffmpeg ? undefined : 'Automatic voice stays off until ffmpeg is available in the controller.',
+    });
+    out.push({
+      label: 'broadcast QA ffprobe',
+      status: ffprobe ? 'ok' : 'fail',
+      detail: ffprobe ? 'available' : 'missing',
+      hint: ffprobe ? undefined : 'Automatic voice stays off until ffprobe is available in the controller.',
+    });
+
+    // Doctor is observational. Only the startup/minute recovery worker may
+    // clear the latch, after it has drained and validated every spool record.
+    const probe = await probeVoiceAuditSinks();
+    out.push({
+      label: 'voice audit ledger',
+      status: probe.ledger.ok ? 'ok' : 'fail',
+      detail: probe.ledger.ok
+        ? 'append + fsync probe passed'
+        : redactVoiceAuditError(probe.ledger.error ?? 'unknown ledger error'),
+      hint: probe.ledger.ok ? undefined : 'Check ownership, free space and write access under state/voice-audit.',
+    });
+    out.push({
+      label: 'voice audit spool',
+      status: probe.spool.ok ? 'ok' : 'fail',
+      detail: probe.spool.ok
+        ? 'exclusive publish + fsync probe passed'
+        : redactVoiceAuditError(probe.spool.error ?? 'unknown spool error'),
+      hint: probe.spool.ok ? undefined : 'Check ownership, free space and write access under state/voice-audit/spool.',
+    });
+    const health = await readVoiceAuditHealth();
+    out.push({
+      label: 'voice audit health',
+      status: health.auditUnhealthy ? 'fail' : 'ok',
+      detail: health.auditUnhealthy
+        ? `audit_unhealthy since ${new Date(health.sinceMs ?? Date.now()).toISOString()} · ${
+          redactVoiceAuditError(health.reason ?? 'unknown reason')
+        }`
+        : 'healthy',
+      hint: health.auditUnhealthy
+        ? 'Automatic voice is fail-closed. Repair the audit paths; both probes must pass before the latch clears.'
+        : undefined,
+    });
+  }
 
   return out;
 }

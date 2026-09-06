@@ -4,6 +4,8 @@
 import express from 'express';
 import { requireAdmin } from '../middleware/auth.js';
 import * as doctor from '../doctor.js';
+import * as settings from '../settings.js';
+import { overlayVoiceAuditSummary } from '../broadcast/voice-audit/health.js';
 
 export const router = express.Router();
 
@@ -57,7 +59,9 @@ router.get('/doctor/last', requireAdmin, async (_req, res) => {
 // section detail, safe to poll.
 router.get('/doctor/summary', requireAdmin, async (_req, res) => {
   try {
-    res.json(await doctor.lastSummary());
+    const summary = await doctor.lastSummary();
+    const enabled = settings.get()?.tts?.broadcastQa?.enabled === true;
+    res.json(await overlayVoiceAuditSummary(summary, enabled));
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

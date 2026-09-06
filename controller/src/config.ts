@@ -295,6 +295,17 @@ export const config = {
     // can absorb the memory carry it.
     noRepeatWindow: envInt('NO_REPEAT_WINDOW', 250, { min: 0 }),
   },
+  voiceAudit: {
+    // Default-off rendered-voice evidence. Nothing creates these paths at
+    // import time; the enabled audit lifecycle owns every mkdir/write.
+    dir: `${STATE_DIR}/voice-audit`,
+    eventsPrefix: `${STATE_DIR}/voice-audit/events-`,
+    spoolDir: `${STATE_DIR}/voice-audit/spool`,
+    healthFile: `${STATE_DIR}/voice-audit/health.json`,
+    rollingReservationsFile: `${STATE_DIR}/voice-audit/rolling-reservations.json`,
+    settingsSnapshotsDir: `${STATE_DIR}/voice-audit/settings-snapshots`,
+    goldenDir: `${STATE_DIR}/voice-audit/golden`,
+  },
   curiosity: {
     // Durable dedup ledger for the `curiosity` segment capability. Holds every
     // "on this day" item surfaced to the agent and every curiosity line aired,

@@ -112,6 +112,40 @@ export function zonedISODate(date = new Date()) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+// Durable station-hour identity for rolling voice policy and evidence bundles.
+// The offset is part of the key so the two repeated fall-back hours are
+// distinct; a skipped spring-forward hour simply has no instant that maps to
+// it. Callers may pass a zone explicitly for deterministic tests/imports.
+export function stationHourKey(date = new Date(), timeZone = getStationTimezone()): string {
+  if (!isValidTimezone(timeZone)) throw new Error(`invalid station timezone: ${timeZone}`);
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'longOffset',
+  }).formatToParts(date);
+  const values: Record<string, string> = {};
+  for (const part of parts) values[part.type] = part.value;
+  const zoneName = values.timeZoneName;
+  let offset = '+0000';
+  if (zoneName && !/^(?:GMT|UTC)$/i.test(zoneName)) {
+    const match = zoneName.match(/^(?:GMT|UTC)([+-])(\d{1,2}):?(\d{2})$/i);
+    if (!match) throw new Error(`cannot derive UTC offset for ${timeZone}`);
+    offset = `${match[1]}${match[2].padStart(2, '0')}${match[3]}`;
+  }
+  const year = values.year;
+  const month = values.month;
+  const day = values.day;
+  const hour = String(Number(values.hour) % 24).padStart(2, '0');
+  if (!year || !month || !day || !Number.isFinite(Number(hour))) {
+    throw new Error(`cannot derive station hour for ${timeZone}`);
+  }
+  return `${year}-${month}-${day}T${hour}${offset}@${timeZone.replaceAll('/', '_')}`;
+}
+
 // --- clock display + spoken forms (pure, pinned by scripts/clock-phrase.test.ts) ---
 // The DJ prompt layer speaks whatever clock shape it is shown (issue: DJs
 // saying "thirteen oh five" with the station set to AM/PM), so the prompt

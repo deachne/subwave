@@ -50,6 +50,15 @@ import * as archives from './archives.js';
 import * as stemCacheStore from '../music/stem-cache.js';
 import * as stemBlendStore from './stem-blend.js';
 import * as doctor from '../doctor.js';
+import { onBroadcastQaChange } from '../settings/change-events.js';
+import {
+  ensureVoiceAuditStarted,
+  redactVoiceAuditError,
+  runVoiceAuditMinute,
+  runVoiceAuditRetention,
+  setVoiceAuditLogger,
+  suspendVoiceAuditLifecycle,
+} from './voice-audit/index.js';
 
 // Pool size: 40 (was 30). The old non-show weights summed to 32 > 30 and
 // take() hard-stops at the target, so the random top-up below was structurally
@@ -1189,6 +1198,83 @@ async function nightlyDoctor() {
 }
 
 // ---------------------------------------------------------------------------
+// DURABLE VOICE AUDIT
+// The retry worker and retention sweep exist only while broadcast QA is
+// enabled. A disabled station therefore creates no voice-audit paths or probe
+// events merely by starting the scheduler.
+// ---------------------------------------------------------------------------
+
+let voiceAuditMinuteTask: ScheduledTask | null = null;
+let voiceAuditRetentionTask: ScheduledTask | null = null;
+let voiceAuditSubscribed = false;
+
+async function voiceAuditMinute(): Promise<void> {
+  try {
+    const result = await runVoiceAuditMinute();
+    if (!result.ok) {
+      queue.log('error', `[voice-audit] ${redactVoiceAuditError(result.message)}`);
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    queue.log(
+      'error',
+      `[voice-audit] recovery failed: ${redactVoiceAuditError(detail)}`,
+    );
+  }
+}
+
+async function voiceAuditRetention(): Promise<void> {
+  try {
+    const removed = await runVoiceAuditRetention();
+    if (removed) queue.log('scheduler', `[voice-audit] pruned ${removed} expired ledger file(s)`);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    queue.log(
+      'error',
+      `[voice-audit] retention failed: ${redactVoiceAuditError(detail)}`,
+    );
+  }
+}
+
+export function syncVoiceAuditSchedule(enabled: boolean): void {
+  if (!enabled) {
+    voiceAuditMinuteTask?.destroy();
+    voiceAuditRetentionTask?.destroy();
+    voiceAuditMinuteTask = null;
+    voiceAuditRetentionTask = null;
+    void suspendVoiceAuditLifecycle().catch((err) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      queue.log(
+        'error',
+        `[voice-audit] lifecycle suspension failed: ${redactVoiceAuditError(detail)}`,
+      );
+    });
+    return;
+  }
+  if (!voiceAuditMinuteTask) {
+    voiceAuditMinuteTask = cron.schedule('* * * * *', () => {
+      void voiceAuditMinute();
+    });
+  }
+  if (!voiceAuditRetentionTask) {
+    voiceAuditRetentionTask = cron.schedule('7 * * * *', () => {
+      void voiceAuditRetention();
+    });
+  }
+  void ensureVoiceAuditStarted().then((result) => {
+    if (!result.ok) {
+      queue.log('error', `[voice-audit] ${redactVoiceAuditError(result.message)}`);
+    }
+  }).catch((err) => {
+    const detail = err instanceof Error ? err.message : String(err);
+    queue.log(
+      'error',
+      `[voice-audit] startup failed: ${redactVoiceAuditError(detail)}`,
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
 // SKILL CRONS
 // Per-skill cron tasks, registered from the `cron:` frontmatter field in
 // SKILL.md. When a timer fires it calls runCapability() directly — same path
@@ -1360,6 +1446,13 @@ export function startScheduler() {
     queue.log('scheduler', '[skills] station timezone changed — re-registering skill crons');
     syncSkillCrons();
   });
+
+  setVoiceAuditLogger((message) => queue.log('error', `[voice-audit] ${message}`));
+  syncVoiceAuditSchedule(settings.get()?.tts?.broadcastQa?.enabled === true);
+  if (!voiceAuditSubscribed) {
+    voiceAuditSubscribed = true;
+    onBroadcastQaChange((qa) => syncVoiceAuditSchedule(qa.enabled));
+  }
 
   queue.log('scheduler', `Scheduler started · skills: ${skillCatalog().map((s: any) => s.name).join(', ')}`);
 }

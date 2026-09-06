@@ -76,7 +76,11 @@ export interface StationSettings {
     pauseWhenEmpty?: boolean;
     noRepeatWindow?: number;
   };
-  tts?: { defaultEngine?: string; byKind?: Record<string, string | undefined> };
+  tts?: {
+    defaultEngine?: string;
+    byKind?: Record<string, string | undefined>;
+    broadcastQa?: { enabled?: boolean };
+  };
   search?: { provider?: string };
   audio?: { embeddings?: boolean; vocalActivity?: boolean; stemCache?: boolean; stemCacheGb?: number };
   transitions?: { pairDrain?: boolean; stemBlends?: boolean };

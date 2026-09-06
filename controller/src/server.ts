@@ -59,6 +59,11 @@ import { loadSecretsIntoEnv } from './setup/secrets.js';
 import { loadSetupConfig } from './setup/config.js';
 import { getSetupStatus } from './setup/firstRun.js';
 import * as library from './music/library.js';
+import {
+  ensureVoiceAuditStarted,
+  redactVoiceAuditError,
+  setVoiceAuditLogger,
+} from './broadcast/voice-audit/index.js';
 
 // Fail fast in production if the admin gate isn't configured.
 assertAdminConfigured();
@@ -227,6 +232,22 @@ app.listen(config.server.port, async () => {
     await settings.load();
     const s = settings.get();
     await settings.ensureLiquidsoapSettingsFile();
+    if (s.tts?.broadcastQa?.enabled === true) {
+      setVoiceAuditLogger((message) => queue.log('error', `[voice-audit] ${message}`));
+      try {
+        const audit = await ensureVoiceAuditStarted();
+        if (!audit.ok) {
+          console.error(
+            `[voice-audit] startup failed closed: ${redactVoiceAuditError(audit.message)}`,
+          );
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[voice-audit] startup failed closed: ${redactVoiceAuditError(detail)}`,
+        );
+      }
+    }
     console.log(
       `[settings] loaded. jingleRatio=${s.jingleRatio} crossfadeDuration=${s.crossfadeDuration} location=${s.weather.locationName} onAir=${settings.resolveOnAirLocation(s)}`,
     );
